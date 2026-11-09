@@ -6,7 +6,9 @@
 
 ## 下载
 
-前往 [Releases](https://github.com/Vallily/Cloud-StarRail/releases/latest) 下载直接运行的 exe 或安装包。支持 Windows 10 / 11 x64；直接运行版需要 WebView2 Runtime，安装包可在缺少时联网补装。
+[直接运行 exe](https://github.com/Vallily/Cloud-StarRail/releases/latest/download/Cloud-StarRail.exe) · [下载安装包](https://github.com/Vallily/Cloud-StarRail/releases/latest/download/Cloud-StarRail-Setup.exe) · [所有版本](https://github.com/Vallily/Cloud-StarRail/releases)
+
+支持 Windows 10 / 11 x64；直接运行版需要 WebView2 Runtime，安装包可在缺少时联网补装。
 
 ## 开发
 
