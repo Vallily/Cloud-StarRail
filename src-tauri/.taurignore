@@ -1,0 +1,2 @@
+# Local UI files are served and reloaded by Vite, not by the Rust watcher.
+ui/**

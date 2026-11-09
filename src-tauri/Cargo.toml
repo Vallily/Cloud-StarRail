@@ -1,0 +1,30 @@
+[package]
+name = "starrail-cloud-desktop"
+version = "0.3.0"
+description = "Desktop shell for the official Cloud Star Rail website"
+edition = "2021"
+rust-version = "1.91"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2.12", features = ["unstable"] }
+tauri-plugin-single-instance = "2"
+
+[features]
+default = []
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
+
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.39"
+
+[[bin]]
+name = "cloud-starrail"
+path = "src/main.rs"
