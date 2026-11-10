@@ -361,3 +361,40 @@ pub fn choose_folder(window: &Window) -> Result<Option<String>, String> {
         value.map(Some)
     }
 }
+
+pub fn open_folder(path: &std::path::Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err("保存位置必须是绝对路径".into());
+    }
+    std::fs::create_dir_all(path).map_err(|e| format!("无法创建保存目录：{e}"))?;
+    unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE)
+            .ok()
+            .map_err(|e| e.to_string())?;
+        struct Apartment;
+        impl Drop for Apartment {
+            fn drop(&mut self) {
+                unsafe {
+                    CoUninitialize();
+                }
+            }
+        }
+        let _apartment = Apartment;
+        // Open the directory itself. The select-items API instead navigates
+        // to its parent when no child item list is supplied.
+        let result = ShellExecuteW(
+            None,
+            windows::core::w!("open"),
+            &windows::core::HSTRING::from(path.as_os_str()),
+            windows::core::PCWSTR::null(),
+            windows::core::PCWSTR::null(),
+            windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        );
+        let code = result.0 as isize;
+        if code > 32 {
+            Ok(())
+        } else {
+            Err(format!("无法打开保存目录，系统返回代码：{code}"))
+        }
+    }
+}

@@ -18,3 +18,14 @@ test('version input cannot escape the release directory', () => {
     assert.throws(() => buildPlan('/project', version), /无效/);
   }
 });
+test('same-version rebuilds preserve earlier artifacts and stable filenames', () => {
+  const first = buildPlan('/project', '0.3.1');
+  const second = buildPlan('/project', '0.3.1', 2);
+  assert.notEqual(first.output, second.output);
+  assert.ok(second.output.endsWith('v0.3.1-build.2'));
+  assert.ok(second.appFile.endsWith('云·星穹铁道.exe'));
+  assert.throws(() => assertNewVersion(second, () => true), /不会覆盖/);
+  for (const revision of [0, -1, 1.5, NaN, Infinity, '../old']) {
+    assert.throws(() => buildPlan('/project', '0.3.1', revision), /无效/);
+  }
+});

@@ -9,7 +9,9 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const release = join(root, 'src-tauri', 'target', 'release');
 const bundles = join(release, 'bundle', 'nsis');
 const config = JSON.parse(readFileSync(join(root, 'src-tauri', 'tauri.conf.json'), 'utf8'));
-const plan = buildPlan(root, config.version);
+const revisionIndex = process.argv.indexOf('--revision');
+const revision = revisionIndex < 0 ? undefined : Number(process.argv[revisionIndex + 1]);
+const plan = buildPlan(root, config.version, revision);
 
 try {
   // The old dist root and all previous version directories are left untouched.

@@ -26,7 +26,21 @@ use tauri::{
 };
 const TITLE: &str = "云·星穹铁道";
 const URL: &str = "https://sr.mihoyo.com/cloud/#/";
+// Keep editable controls usable while disabling browser menus and incidental text selection.
+const INTERACTION_SCRIPT: &str = r#"(()=>{
+  window.addEventListener('contextmenu',event=>event.preventDefault(),true);
+  const install=()=>{
+    if(document.getElementById('cloud-starrail-interaction-style'))return;
+    const style=document.createElement('style');style.id='cloud-starrail-interaction-style';
+    style.textContent='*{-webkit-user-select:none!important;user-select:none!important}input,textarea,[contenteditable],[contenteditable] *{-webkit-user-select:text!important;user-select:text!important}';
+    (document.head||document.documentElement).appendChild(style);
+  };
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',install,{once:true});else install();
+})()"#;
+
 struct ControlsOpen(AtomicBool);
+#[derive(Default)]
+struct SettingsAnchor(std::sync::Mutex<[f64; 4]>);
 struct ExitApproved(AtomicBool);
 struct ExitWaiting(AtomicBool);
 struct ConfirmationOpen(AtomicBool);
@@ -49,6 +63,7 @@ fn main() {
         .manage(window_geometry::Aspect::default())
         .manage(recorder::Recorder::default())
         .manage(ControlsOpen(AtomicBool::new(false)))
+        .manage(SettingsAnchor::default())
         .manage(ExitApproved(AtomicBool::new(false)))
         .manage(ExitWaiting(AtomicBool::new(false)))
         .manage(ConfirmationOpen(AtomicBool::new(false)))
@@ -66,6 +81,7 @@ fn main() {
             std::fs::create_dir_all(&profile)?;
             let main = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title(TITLE)
+                .initialization_script(INTERACTION_SCRIPT)
                 .decorations(false)
                 .inner_size(1280., 760.)
                 .min_inner_size(480., 320.)
@@ -91,6 +107,7 @@ fn main() {
                         WebviewUrl::External(URL.parse()?)
                     },
                 )
+                .initialization_script(INTERACTION_SCRIPT)
                 .additional_browser_args(if std::env::args_os().any(|a| a == "--record-smoke") {
                     "--autoplay-policy=no-user-gesture-required"
                 } else {
@@ -112,6 +129,7 @@ fn main() {
                     .window_features(features)
                     .data_directory(popup_profile.clone())
                     .title(TITLE)
+                    .initialization_script(INTERACTION_SCRIPT)
                     .on_navigation(|u| {
                         matches!(u.scheme(), "https" | "http") || u.as_str() == "about:blank"
                     })
@@ -129,6 +147,7 @@ fn main() {
             )?;
             native.add_child(
                 WebviewBuilder::new("controls", WebviewUrl::App("controls.html".into()))
+                    .initialization_script(INTERACTION_SCRIPT)
                     .transparent(true)
                     .background_color(tauri::webview::Color(0, 0, 0, 0)),
                 LogicalPosition::new(1104., 0.),
@@ -138,6 +157,7 @@ fn main() {
             // DWM corners. Showing it does not run a native window opening animation.
             let confirmation = native.add_child(
                 WebviewBuilder::new("exit-confirm", WebviewUrl::App("confirm.html".into()))
+                    .initialization_script(INTERACTION_SCRIPT)
                     .transparent(true)
                     .background_color(tauri::webview::Color(0, 0, 0, 0)),
                 LogicalPosition::new(0., 0.),
@@ -147,6 +167,7 @@ fn main() {
             let settings =
                 WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
                     .title("截图与录屏 · 云·星穹铁道")
+                    .initialization_script(INTERACTION_SCRIPT)
                     .decorations(false)
                     .inner_size(460., 600.)
                     .resizable(false)
@@ -161,7 +182,10 @@ fn main() {
                     .controller()
                     .CoreWebView2()
                     .and_then(|v| v.Settings())
-                    .and_then(|v| v.cast::<ICoreWebView2Settings3>())
+                    .and_then(|v| {
+                        v.SetAreDefaultContextMenusEnabled(false)?;
+                        v.cast::<ICoreWebView2Settings3>()
+                    })
                     .and_then(|v| v.SetAreBrowserAcceleratorKeysEnabled(false));
                 if let Err(e) = result {
                     eprintln!("Cannot disable settings browser accelerators: {e}");
@@ -396,6 +420,14 @@ fn install_keys(view: &Webview) -> tauri::Result<()> {
     let relay_only = view.label() == "exit-confirm";
     let window = view.window();
     view.with_webview(move |platform| unsafe {
+        if let Err(e) = platform
+            .controller()
+            .CoreWebView2()
+            .and_then(|v| v.Settings())
+            .and_then(|v| v.SetAreDefaultContextMenusEnabled(false))
+        {
+            eprintln!("Cannot disable browser context menu: {e}");
+        }
         let handler = AcceleratorKeyPressedEventHandler::create(Box::new(move |_, args| {
             if let Some(args) = args {
                 let mut key = 0;
@@ -609,6 +641,9 @@ fn show_settings(w: &Window) -> tauri::Result<()> {
         return Ok(());
     }
     if let Some(view) = w.app_handle().get_webview_window("settings") {
+        if view.is_visible()? {
+            return view.eval("window.closeSettings?.()");
+        }
         let origin = w.inner_position()?;
         let scale = w.scale_factor()?;
         let mut x = origin.x + (16. * scale) as i32;
@@ -659,11 +694,22 @@ async fn media_settings(
     action: String,
     settings: Option<preferences::Settings>,
     height: Option<f64>,
+    anchor: Option<[f64; 4]>,
 ) -> Result<serde_json::Value, String> {
     trusted_local(&webview)?;
     let app = webview.app_handle();
     let state = app.state::<preferences::Preferences>();
     match action.as_str() {
+        "anchor" => {
+            if webview.label() != "main" {
+                return Err("Untrusted view".into());
+            }
+            let bounds = anchor
+                .filter(|a| a.iter().all(|v| v.is_finite()))
+                .ok_or("Invalid anchor")?;
+            *app.state::<SettingsAnchor>().0.lock().unwrap() = bounds;
+            Ok(serde_json::json!(true))
+        }
         "resize" => {
             if webview.label() != "settings" {
                 return Err("Untrusted view".into());
@@ -684,6 +730,13 @@ async fn media_settings(
             Ok(serde_json::json!(desired))
         }
         "dismiss" => {
+            // Clicking the anchor is handled by its pointer-down toggle. A blur
+            // arriving first must not hide then reopen the same popup.
+            if let Some(main) = app.get_window("main") {
+                if settings_anchor_active(&main) {
+                    return Ok(serde_json::json!(true));
+                }
+            }
             state.editing.store(false, Ordering::Relaxed);
             webview.window().hide().map_err(|e| e.to_string())?;
             Ok(serde_json::json!(true))
@@ -722,6 +775,16 @@ async fn media_settings(
             }
             Ok(serde_json::json!(true))
         }
+        "open_folder" => {
+            if webview.label() != "settings" {
+                return Err("Untrusted view".into());
+            }
+            let folder = state.settings().folder;
+            tauri::async_runtime::spawn_blocking(move || media::open_folder(&folder))
+                .await
+                .map_err(|e| e.to_string())??;
+            Ok(serde_json::json!(true))
+        }
         "folder" => {
             let w = webview.window();
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
@@ -758,4 +821,23 @@ fn defer_pending_exit(w: &Window) -> bool {
         });
     }
     true
+}
+
+fn settings_anchor_active(w: &Window) -> bool {
+    use windows::Win32::{Foundation::HWND, UI::WindowsAndMessaging::GetForegroundWindow};
+    if !w
+        .hwnd()
+        .is_ok_and(|h| unsafe { GetForegroundWindow() == HWND(h.0) })
+    {
+        return false;
+    }
+    let (Ok(cursor), Ok(origin), Ok(scale)) =
+        (w.cursor_position(), w.inner_position(), w.scale_factor())
+    else {
+        return false;
+    };
+    let [left, top, right, bottom] = *w.state::<SettingsAnchor>().0.lock().unwrap();
+    let x = (cursor.x - f64::from(origin.x)) / scale;
+    let y = (cursor.y - f64::from(origin.y)) / scale;
+    left < right && top < bottom && x >= left && x < right && y >= top && y < bottom
 }

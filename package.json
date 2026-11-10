@@ -1,6 +1,6 @@
 {
   "name": "honkai-starrail-cloud-desktop",
-  "version": "0.5.0",
+  "version": "0.3.1",
   "private": true,
   "description": "A lightweight Windows desktop shell for the official Cloud Star Rail website.",
   "scripts": {

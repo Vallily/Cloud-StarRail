@@ -1,3 +1,4 @@
+import {icons} from './icons.js';
 let fullscreen = false;
 let revealed = false;
 let hideTimer;
@@ -8,9 +9,8 @@ window.setFullscreen = (full, open = false) => {
   const button = document.querySelector('[data-action="toggle"]');
   button.title = full ? '窗口化' : '无边框全屏';
   button.setAttribute('aria-label', button.title);
-  document.querySelector('#mode').innerHTML = full
-    ? '<path d="M7 4h9v9M4 7h9v9H4z"/>'
-    : '<rect x="4" y="4" width="12" height="12" rx="1"/>';
+  const icon=full?'copy':'square';
+  if(button.dataset.icon!==icon){button.innerHTML=icons[icon];button.dataset.icon=icon;}
 };
 document.querySelectorAll('button').forEach(button => button.addEventListener('click', event => {
   if (event.detail > 0) button.blur();

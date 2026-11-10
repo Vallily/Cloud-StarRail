@@ -2,3 +2,7 @@
 
 /* Compact, automatically saved popover. */
 html{height:100%;overflow:hidden}body{height:auto;min-height:100%;display:block;overflow:hidden}main{overflow:hidden;padding:4px 22px 8px;animation:none}section{padding:12px 0 10px}h2{margin-bottom:8px}.row{min-height:34px;margin:4px 0}p{margin-top:6px}#feedback{margin:0;padding:0 22px 12px;max-width:none;color:#ffb7b7}main::-webkit-scrollbar{display:none}@media(max-height:550px){section{padding:7px 0}h2{margin-bottom:5px}.row{min-height:30px;margin:2px 0}button,input,select{min-height:30px}p{margin-top:4px;line-height:1.4}}
+
+#custom{margin:14px 0 10px;padding:14px;background:#111b2866;border:1px solid #ffffff14;border-radius:8px}.custom-heading{display:flex;align-items:center;justify-content:space-between;gap:20px;min-height:36px}.custom-heading .number input{width:104px}.custom-heading label{white-space:nowrap}#custom input[type=range]{display:block;margin:12px 0 6px;min-height:20px}.custom-limits{display:flex;justify-content:space-between;gap:16px;font-size:12px;line-height:1.5;color:#aab9cb}
+
+#open-folder{width:34px;min-width:34px;padding:0;display:grid;place-items:center;flex-shrink:0}#open-folder svg{width:18px;height:18px}main{user-select:none;-webkit-user-select:none}input,textarea{user-select:text;-webkit-user-select:text}

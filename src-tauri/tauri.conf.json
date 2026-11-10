@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "云·星穹铁道",
-  "version": "0.5.0",
+  "version": "0.3.1",
   "identifier": "io.github.starrail-cloud-desktop",
   "build": {
     "frontendDist": "ui",
@@ -17,8 +17,12 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
-    "icon": ["icons/icon.ico"],
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "icons/icon.ico"
+    ],
     "shortDescription": "官方云星铁网页的轻量桌面窗口",
     "longDescription": "基于 Tauri 和 WebView2 的非官方桌面外壳，游戏内容、登录、排队和串流由米哈游官方网页提供。",
     "windows": {
@@ -27,7 +31,9 @@
         "silent": true
       },
       "nsis": {
-        "languages": ["SimpChinese"],
+        "languages": [
+          "SimpChinese"
+        ],
         "displayLanguageSelector": false,
         "installMode": "currentUser"
       }
