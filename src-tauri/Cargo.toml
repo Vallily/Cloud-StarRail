@@ -1,16 +1,20 @@
 [package]
 name = "starrail-cloud-desktop"
-version = "0.3.0"
+version = "0.5.0"
 description = "Desktop shell for the official Cloud Star Rail website"
 edition = "2021"
 rust-version = "1.91"
 
 [build-dependencies]
+cc = "1"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2.12", features = ["unstable"] }
 tauri-plugin-single-instance = "2"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 
 [features]
 default = []
@@ -24,6 +28,8 @@ strip = true
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.39"
+windows-core = "0.62.2"
+windows = { version = "0.62.2", features = ["Foundation", "Security_Authorization_AppCapabilityAccess", "Win32_UI_Shell_Common", "Win32_Storage_FileSystem", "Win32_Devices_HumanInterfaceDevice", "Win32_UI_Input", "Graphics_Capture", "Graphics_DirectX", "Graphics_DirectX_Direct3D11", "Win32_System_WinRT", "Win32_System_WinRT_Direct3D11", "Win32_System_WinRT_Graphics_Capture", "Win32_Graphics_Dwm", "Win32_UI_Shell", "Win32_Media_MediaFoundation", "Win32_Media_Audio", "Win32_Media_KernelStreaming", "Win32_Media_Multimedia", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_System_Performance", "Win32_Graphics_Gdi", "Win32_Storage_Xps", "Win32_UI_Input_KeyboardAndMouse", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging"] }
 
 [[bin]]
 name = "cloud-starrail"

@@ -1,0 +1,3 @@
+本目录音效按项目用户要求取自本机 Steam 客户端的 steamui/sounds。
+文件：recording_start.wav、recording_stop.wav、camera1.wav。
+这些第三方音效不属于本项目 MIT 许可证授予的内容，相关权利归原权利人所有。

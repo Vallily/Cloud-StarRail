@@ -1,5 +1,24 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod feedback;
+mod media;
+mod preferences;
+#[cfg(windows)]
+mod record_audio;
+mod record_control;
+#[cfg(windows)]
+mod record_video;
+#[cfg(windows)]
+mod recorder;
+#[cfg(windows)]
+mod steam_input;
+#[cfg(windows)]
+mod steam_probe;
+#[cfg(windows)]
+mod steam_snapshot;
+#[cfg(windows)]
+mod window_geometry;
+
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tauri::{
     webview::NewWindowResponse, LogicalPosition, LogicalSize, Manager, Webview, WebviewBuilder,
@@ -9,13 +28,29 @@ const TITLE: &str = "云·星穹铁道";
 const URL: &str = "https://sr.mihoyo.com/cloud/#/";
 struct ControlsOpen(AtomicBool);
 struct ExitApproved(AtomicBool);
+struct ExitWaiting(AtomicBool);
 struct ConfirmationOpen(AtomicBool);
 static POPUP: AtomicUsize = AtomicUsize::new(0);
 
 fn main() {
+    #[cfg(windows)]
+    if std::env::args_os().any(|argument| argument == "--steam-probe") {
+        steam_probe::run();
+        return;
+    }
+    let mut context = tauri::generate_context!();
+    if std::env::args_os().any(|a| a == "--record-smoke") {
+        context.config_mut().identifier.push_str(".record-smoke");
+    }
+    if std::env::args_os().any(|a| a == "--record-dev") {
+        context.config_mut().identifier.push_str(".record-dev");
+    }
     tauri::Builder::default()
+        .manage(window_geometry::Aspect::default())
+        .manage(recorder::Recorder::default())
         .manage(ControlsOpen(AtomicBool::new(false)))
         .manage(ExitApproved(AtomicBool::new(false)))
+        .manage(ExitWaiting(AtomicBool::new(false)))
         .manage(ConfirmationOpen(AtomicBool::new(false)))
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             if let Some(w) = app.get_window("main") {
@@ -24,8 +59,9 @@ fn main() {
                 report(w.set_focus());
             }
         }))
-        .invoke_handler(tauri::generate_handler![window_action])
+        .invoke_handler(tauri::generate_handler![window_action, media_settings])
         .setup(|app| {
+            app.manage(preferences::Preferences::load(app.handle())?);
             let profile = app.path().app_local_data_dir()?.join("WebView2");
             std::fs::create_dir_all(&profile)?;
             let main = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
@@ -42,40 +78,52 @@ fn main() {
                 .or(app.primary_monitor()?);
             let native = app.get_window("main").expect("main window exists");
             fit_window(&native, monitor)?;
+            window_geometry::install(&native)?;
+            restore_placement(&native)?;
             let popup_app = app.handle().clone();
             let popup_profile = profile.clone();
             let game = native.add_child(
-                WebviewBuilder::new("game", WebviewUrl::External(URL.parse()?))
-                    .data_directory(profile)
-                    .disable_drag_drop_handler()
-                    .on_navigation(|url| matches!(url.scheme(), "https" | "http"))
-                    .on_new_window(move |url, features| {
-                        if !matches!(url.scheme(), "https" | "http")
-                            && url.as_str() != "about:blank"
-                        {
-                            return NewWindowResponse::Deny;
+                WebviewBuilder::new(
+                    "game",
+                    if std::env::args_os().any(|a| a == "--record-smoke") {
+                        WebviewUrl::App("record-test.html".into())
+                    } else {
+                        WebviewUrl::External(URL.parse()?)
+                    },
+                )
+                .additional_browser_args(if std::env::args_os().any(|a| a == "--record-smoke") {
+                    "--autoplay-policy=no-user-gesture-required"
+                } else {
+                    ""
+                })
+                .data_directory(profile)
+                .disable_drag_drop_handler()
+                .on_navigation(|url| matches!(url.scheme(), "https" | "http"))
+                .on_new_window(move |url, features| {
+                    if !matches!(url.scheme(), "https" | "http") && url.as_str() != "about:blank" {
+                        return NewWindowResponse::Deny;
+                    }
+                    let label = format!("popup-{}", POPUP.fetch_add(1, Ordering::Relaxed));
+                    match WebviewWindowBuilder::new(
+                        &popup_app,
+                        label,
+                        WebviewUrl::External("about:blank".parse().unwrap()),
+                    )
+                    .window_features(features)
+                    .data_directory(popup_profile.clone())
+                    .title(TITLE)
+                    .on_navigation(|u| {
+                        matches!(u.scheme(), "https" | "http") || u.as_str() == "about:blank"
+                    })
+                    .build()
+                    {
+                        Ok(window) => NewWindowResponse::Create { window },
+                        Err(e) => {
+                            eprintln!("Popup failed: {e}");
+                            NewWindowResponse::Deny
                         }
-                        let label = format!("popup-{}", POPUP.fetch_add(1, Ordering::Relaxed));
-                        match WebviewWindowBuilder::new(
-                            &popup_app,
-                            label,
-                            WebviewUrl::External("about:blank".parse().unwrap()),
-                        )
-                        .window_features(features)
-                        .data_directory(popup_profile.clone())
-                        .title(TITLE)
-                        .on_navigation(|u| {
-                            matches!(u.scheme(), "https" | "http") || u.as_str() == "about:blank"
-                        })
-                        .build()
-                        {
-                            Ok(window) => NewWindowResponse::Create { window },
-                            Err(e) => {
-                                eprintln!("Popup failed: {e}");
-                                NewWindowResponse::Deny
-                            }
-                        }
-                    }),
+                    }
+                }),
                 LogicalPosition::new(0., 40.),
                 LogicalSize::new(1280., 720.),
             )?;
@@ -96,6 +144,44 @@ fn main() {
                 LogicalSize::new(1280., 760.),
             )?;
             confirmation.hide()?;
+            let settings =
+                WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
+                    .title("截图与录屏 · 云·星穹铁道")
+                    .decorations(false)
+                    .inner_size(460., 600.)
+                    .resizable(false)
+                    .skip_taskbar(true)
+                    .visible(false)
+                    .parent(&main)?
+                    .build()?;
+            settings.with_webview(|platform| unsafe {
+                use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
+                use windows::core::Interface;
+                let result = platform
+                    .controller()
+                    .CoreWebView2()
+                    .and_then(|v| v.Settings())
+                    .and_then(|v| v.cast::<ICoreWebView2Settings3>())
+                    .and_then(|v| v.SetAreBrowserAcceleratorKeysEnabled(false));
+                if let Err(e) = result {
+                    eprintln!("Cannot disable settings browser accelerators: {e}");
+                }
+            })?;
+            settings.on_window_event({
+                let app = app.handle().clone();
+                move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        if let Some(v) = app.get_webview_window("settings") {
+                            let _ = v.hide();
+                        }
+                        app.state::<preferences::Preferences>()
+                            .editing
+                            .store(false, Ordering::Relaxed);
+                    }
+                }
+            });
+            install_keys(&confirmation)?;
             install_keys(&game)?;
             if let Some(chrome) = app.get_webview("controls") {
                 install_keys(&chrome)?;
@@ -104,8 +190,19 @@ fn main() {
                 install_keys(&shell)?;
             }
             layout(&native)?;
+            feedback::warm();
             main.show()?;
             start_edge_watcher(app.handle().clone());
+            recorder::watch(native.clone());
+            #[cfg(windows)]
+            if std::env::args_os().any(|argument| {
+                argument == "--steam"
+                    || argument == "--steam-isolate"
+                    || argument == "--steam-input-test"
+                    || argument == "--steam-web-overlay"
+            }) {
+                steam_probe::start_on_main(native);
+            }
             Ok(())
         })
         .on_window_event(|w, event| {
@@ -113,11 +210,19 @@ fn main() {
                 return;
             }
             match event {
-                tauri::WindowEvent::Resized(_) | tauri::WindowEvent::ScaleFactorChanged { .. } => {
-                    report(layout(w))
+                tauri::WindowEvent::Resized(_) => report(layout(w)),
+                tauri::WindowEvent::ScaleFactorChanged { .. } => {
+                    window_geometry::update_scale(w);
+                    report(layout(w));
                 }
                 tauri::WindowEvent::CloseRequested { api, .. } => {
-                    if !w.state::<ExitApproved>().0.load(Ordering::Relaxed) {
+                    if w.state::<ExitApproved>().0.load(Ordering::Relaxed) {
+                        w.state::<preferences::Preferences>().save_window(w);
+                    }
+                    if w.state::<ExitApproved>().0.load(Ordering::Relaxed) && defer_pending_exit(w)
+                    {
+                        api.prevent_close();
+                    } else if !w.state::<ExitApproved>().0.load(Ordering::Relaxed) {
                         api.prevent_close();
                         report(show_exit_confirmation(w));
                     }
@@ -126,7 +231,7 @@ fn main() {
                 _ => {}
             }
         })
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("Could not start Cloud Star Rail");
 }
 
@@ -175,6 +280,15 @@ async fn window_action(webview: Webview, action: String) -> Result<(), String> {
         return Ok(());
     }
     let result = match action.as_str() {
+        "screenshot" => {
+            media::screenshot(w.clone());
+            Ok(())
+        }
+        "settings" => show_settings(&w),
+        "record_toggle" => {
+            w.state::<recorder::Recorder>().toggle(w.clone());
+            Ok(())
+        }
         "minimize" => w.minimize(),
         "toggle" => toggle(&w),
         "close" => w.close(),
@@ -195,14 +309,14 @@ async fn window_action(webview: Webview, action: String) -> Result<(), String> {
 
 fn fit_window(w: &Window, monitor: Option<tauri::Monitor>) -> tauri::Result<()> {
     if let Some(m) = monitor {
-        let screen = m.size();
+        let (ratio_width, ratio_height) = window_geometry::initialize(w, 16, 9);
         let area = m.work_area();
-        // Whole window, including the 40px title area, follows the monitor's aspect ratio.
-        let factor = (f64::from(area.size.width) / f64::from(screen.width))
-            .min(f64::from(area.size.height) / f64::from(screen.height))
-            * 0.82;
-        let width = (f64::from(screen.width) * factor).round() as u32;
-        let height = (f64::from(screen.height) * factor).round() as u32;
+        // Preserve the GAME viewport ratio; the title is extra client height.
+        let top = (40.0 * w.scale_factor()?).round();
+        let factor = (f64::from(area.size.width) * 0.82 / f64::from(ratio_width))
+            .min((f64::from(area.size.height) * 0.82 - top).max(1.0) / f64::from(ratio_height));
+        let width = (f64::from(ratio_width) * factor).round() as u32;
+        let height = (f64::from(ratio_height) * factor + top).round() as u32;
         w.set_size(tauri::PhysicalSize::new(width, height))?;
         w.set_position(tauri::PhysicalPosition::new(
             area.position.x + (area.size.width as i32 - width as i32) / 2,
@@ -217,17 +331,24 @@ fn toggle(w: &Window) -> tauri::Result<()> {
         return Ok(());
     }
     let fullscreen = w.is_fullscreen()?;
-    let monitor = w.current_monitor()?;
     w.state::<ControlsOpen>().0.store(false, Ordering::Relaxed);
+    if !fullscreen {
+        w.state::<preferences::Preferences>().save_window(w);
+    }
     w.set_fullscreen(!fullscreen)?;
+    window_geometry::update_scale(w);
     if fullscreen {
-        fit_window(w, monitor)?;
+        restore_placement(w)?;
     }
     layout(w)?;
     focus_game(w)
 }
 
 fn layout(w: &Window) -> tauri::Result<()> {
+    #[cfg(windows)]
+    if steam_probe::webviews_hidden() {
+        return Ok(());
+    }
     let size = w.inner_size()?.to_logical::<f64>(w.scale_factor()?);
     if size.width < 1. || size.height < 1. {
         return Ok(());
@@ -239,6 +360,9 @@ fn layout(w: &Window) -> tauri::Result<()> {
         game.set_size(LogicalSize::new(size.width, (size.height - top).max(1.)))?;
     }
     sync_controls(w)?;
+    if let Some(view) = w.app_handle().get_webview("main") {
+        view.eval(format!("window.setShellFullscreen?.({fullscreen})"))?;
+    }
     sync_confirmation(w)
 }
 
@@ -269,6 +393,7 @@ fn sync_controls(w: &Window) -> tauri::Result<()> {
 #[cfg(target_os = "windows")]
 fn install_keys(view: &Webview) -> tauri::Result<()> {
     use webview2_com::{AcceleratorKeyPressedEventHandler, Microsoft::Web::WebView2::Win32::*};
+    let relay_only = view.label() == "exit-confirm";
     let window = view.window();
     view.with_webview(move |platform| unsafe {
         let handler = AcceleratorKeyPressedEventHandler::create(Box::new(move |_, args| {
@@ -279,6 +404,39 @@ fn install_keys(view: &Webview) -> tauri::Result<()> {
                 args.VirtualKey(&mut key)?;
                 args.KeyEventKind(&mut kind)?;
                 args.PhysicalKeyStatus(&mut status)?;
+                steam_input::observe_web_key(
+                    key,
+                    kind == COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN
+                        || kind == COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN,
+                );
+                if !window.state::<preferences::Preferences>().editing() {
+                    let config = window.state::<preferences::Preferences>().settings();
+                    if key == config.screenshot_key.key
+                        && (kind == COREWEBVIEW2_KEY_EVENT_KIND_KEY_UP
+                            || kind == COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_UP)
+                    {
+                        media::clear_screenshot_key();
+                    }
+                    if config.record_key.matches(key) || config.screenshot_key.matches(key) {
+                        if config.screenshot_key.matches(key)
+                            && !status.WasKeyDown.as_bool()
+                            && (kind == COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN
+                                || kind == COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN)
+                        {
+                            media::observe_screenshot_key();
+                        }
+                        args.SetHandled(true)?;
+                        // The native watcher executes edge-triggered shortcuts for every view.
+                        return Ok(());
+                    }
+                }
+                if steam_input::is_web_toggle(key) {
+                    args.SetHandled(true)?;
+                    return Ok(());
+                }
+                if relay_only {
+                    return Ok(());
+                }
                 let close = key == 0x73 && status.IsMenuKeyDown.as_bool();
                 let fullscreen = key == 0x7A;
                 if close || fullscreen {
@@ -324,7 +482,8 @@ fn start_edge_watcher(app: tauri::AppHandle) {
         let Some(w) = app.get_window("main") else {
             break;
         };
-        if w.state::<ConfirmationOpen>().0.load(Ordering::Relaxed)
+        if steam_probe::webviews_hidden()
+            || w.state::<ConfirmationOpen>().0.load(Ordering::Relaxed)
             || !w.is_fullscreen().unwrap_or(false)
             || !w.is_focused().unwrap_or(false)
             || w.state::<ControlsOpen>().0.load(Ordering::Relaxed)
@@ -390,4 +549,213 @@ fn focus_game(w: &Window) -> tauri::Result<()> {
         game.set_focus()?;
     }
     Ok(())
+}
+
+fn restore_placement(w: &Window) -> tauri::Result<()> {
+    let saved = w
+        .state::<preferences::Preferences>()
+        .data
+        .lock()
+        .unwrap()
+        .window
+        .clone();
+    if let Some(saved) = saved {
+        if saved.width >= 480. {
+            let monitors = w.available_monitors()?;
+            let monitor = monitors
+                .iter()
+                .find(|m| {
+                    let a = m.work_area();
+                    saved.x >= a.position.x
+                        && saved.y >= a.position.y
+                        && saved.x < a.position.x + a.size.width as i32
+                        && saved.y < a.position.y + a.size.height as i32
+                })
+                .cloned()
+                .or(w.primary_monitor()?);
+            if let Some(m) = monitor {
+                let scale = m.scale_factor();
+                let area = m.work_area();
+                let width = (saved.width * scale)
+                    .min(area.size.width as f64)
+                    .min((area.size.height as f64 - 40. * scale).max(1.) * 16. / 9.);
+                let height = width * 9. / 16. + 40. * scale;
+                w.set_size(tauri::PhysicalSize::new(
+                    width.round() as u32,
+                    height.round() as u32,
+                ))?;
+                w.set_position(tauri::PhysicalPosition::new(
+                    saved.x.clamp(
+                        area.position.x,
+                        area.position.x + (area.size.width as f64 - width).max(0.) as i32,
+                    ),
+                    saved.y.clamp(
+                        area.position.y,
+                        area.position.y + (area.size.height as f64 - height).max(0.) as i32,
+                    ),
+                ))?;
+            }
+        }
+        // Restore fullscreen only during startup; toggle() has already left fullscreen.
+        if saved.fullscreen && !w.is_visible()? {
+            w.set_fullscreen(true)?;
+        }
+        window_geometry::update_scale(w);
+    }
+    Ok(())
+}
+fn show_settings(w: &Window) -> tauri::Result<()> {
+    if w.is_fullscreen()? {
+        return Ok(());
+    }
+    if let Some(view) = w.app_handle().get_webview_window("settings") {
+        let origin = w.inner_position()?;
+        let scale = w.scale_factor()?;
+        let mut x = origin.x + (16. * scale) as i32;
+        let mut y = origin.y + (44. * scale) as i32;
+        if let Some(m) = w.current_monitor()? {
+            let area = m.work_area();
+            let height = (view.inner_size()?.height as f64)
+                .min(area.size.height as f64 - 16.)
+                .max(200.);
+            view.set_size(tauri::PhysicalSize::new(
+                (460. * scale).round() as u32,
+                height.round() as u32,
+            ))?;
+            x = x.clamp(
+                area.position.x,
+                area.position.x + (area.size.width as f64 - 460. * scale).max(0.) as i32,
+            );
+            y = y.clamp(
+                area.position.y,
+                area.position.y + (area.size.height as f64 - height).max(0.) as i32,
+            );
+        }
+        view.set_position(tauri::PhysicalPosition::new(x, y))?;
+        view.show()?;
+        view.set_focus()?;
+        view.eval("window.loadSettings?.()")?;
+    }
+    Ok(())
+}
+fn trusted_local(view: &Webview) -> Result<(), String> {
+    if !matches!(view.label(), "settings" | "main") {
+        return Err("Untrusted view".into());
+    }
+    let url = view.url().map_err(|e| e.to_string())?;
+    if url.scheme() != "tauri"
+        && !matches!(
+            url.host_str(),
+            Some("tauri.localhost" | "localhost" | "127.0.0.1")
+        )
+    {
+        return Err("Untrusted origin".into());
+    }
+    Ok(())
+}
+#[tauri::command]
+async fn media_settings(
+    webview: Webview,
+    action: String,
+    settings: Option<preferences::Settings>,
+    height: Option<f64>,
+) -> Result<serde_json::Value, String> {
+    trusted_local(&webview)?;
+    let app = webview.app_handle();
+    let state = app.state::<preferences::Preferences>();
+    match action.as_str() {
+        "resize" => {
+            if webview.label() != "settings" {
+                return Err("Untrusted view".into());
+            }
+            let requested = height
+                .filter(|h| h.is_finite())
+                .ok_or("Invalid height")?
+                .clamp(200., 900.);
+            let w = webview.window();
+            let max = w
+                .current_monitor()
+                .map_err(|e| e.to_string())?
+                .map(|m| m.work_area().size.height as f64 / m.scale_factor() - 16.)
+                .unwrap_or(800.);
+            let desired = requested.min(max).max(200.);
+            w.set_size(tauri::LogicalSize::new(460., desired))
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::json!(desired))
+        }
+        "dismiss" => {
+            state.editing.store(false, Ordering::Relaxed);
+            webview.window().hide().map_err(|e| e.to_string())?;
+            Ok(serde_json::json!(true))
+        }
+        "drag" => {
+            webview
+                .window()
+                .start_dragging()
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::json!(true))
+        }
+        "get" => serde_json::to_value(state.settings()).map_err(|e| e.to_string()),
+        "save" => {
+            let mut settings = settings.ok_or("Missing settings")?;
+            settings.validate()?;
+            let mut data = state.data.lock().unwrap();
+            let mut updated = data.clone();
+            updated.settings = settings;
+            state.commit(&updated)?;
+            *data = updated;
+            Ok(serde_json::json!(true))
+        }
+        "editing" => {
+            state.editing.store(true, Ordering::Relaxed);
+            Ok(serde_json::json!(true))
+        }
+        "edited" => {
+            state.editing.store(false, Ordering::Relaxed);
+            Ok(serde_json::json!(true))
+        }
+        "close" => {
+            state.editing.store(false, Ordering::Relaxed);
+            webview.window().hide().map_err(|e| e.to_string())?;
+            if let Some(w) = app.get_window("main") {
+                focus_game(&w).map_err(|e| e.to_string())?;
+            }
+            Ok(serde_json::json!(true))
+        }
+        "folder" => {
+            let w = webview.window();
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            app.run_on_main_thread(move || {
+                let _ = tx.send(media::choose_folder(&w));
+            })
+            .map_err(|e| e.to_string())?;
+            tauri::async_runtime::spawn_blocking(move || rx.recv().map_err(|e| e.to_string())?)
+                .await
+                .map_err(|e| e.to_string())?
+                .map(|v| serde_json::json!(v))
+        }
+        _ => Err("Unknown settings action".into()),
+    }
+}
+
+fn defer_pending_exit(w: &Window) -> bool {
+    media::close_screenshots();
+    let recorder = w.state::<recorder::Recorder>();
+    recorder.prepare_close();
+    if !recorder.busy() && media::pending_screenshots() == 0 && feedback::pending() == 0 {
+        return false;
+    }
+    if !w.state::<ExitWaiting>().0.swap(true, Ordering::AcqRel) {
+        let w = w.clone();
+        std::thread::spawn(move || {
+            while w.state::<recorder::Recorder>().busy()
+                || media::pending_screenshots() > 0
+                || feedback::pending() > 0
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            w.app_handle().exit(0);
+        });
+    }
+    true
 }

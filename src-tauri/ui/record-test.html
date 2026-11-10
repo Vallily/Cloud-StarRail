@@ -1,0 +1,4 @@
+<!doctype html><html><meta charset="utf-8"><title>Recording verification</title><style>html,body{margin:0;background:#142235;color:white;font:24px sans-serif}canvas{width:100vw;height:100vh}</style><canvas></canvas><script>
+const c=document.querySelector('canvas'),ctx=c.getContext('2d');function draw(t){c.width=innerWidth;c.height=innerHeight;ctx.fillStyle='#142235';ctx.fillRect(0,0,c.width,c.height);ctx.fillStyle='#50c8e0';ctx.fillRect((t/4)%(c.width+150)-150,c.height/3,150,c.height/3);ctx.fillStyle='#f4e0a8';ctx.font='32px sans-serif';ctx.fillText('Cloud-StarRail recording verification',35,60);ctx.fillText((t/1000).toFixed(2)+' s',35,110);requestAnimationFrame(draw)}requestAnimationFrame(draw);
+const a=new AudioContext();const o=a.createOscillator(),g=a.createGain();o.frequency.value=440;g.gain.value=.04;o.connect(g).connect(a.destination);o.start();a.resume();
+</script></html>

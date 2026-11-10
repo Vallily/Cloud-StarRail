@@ -20,3 +20,7 @@ npm run dev
 打包：`npm run build`。更多说明见 [开发文档](docs/DEVELOPMENT.md)。
 
 本项目为非官方社区项目，与米哈游 / HoYoverse 无关联。源码采用 [MIT](LICENSE) 许可证。
+
+支持窗口／无边框全屏，以及截图和硬件加速录屏。默认 F12 截图，Ctrl+F12 开始／结束录屏，也可在设置中修改。设置自动保存，媒体默认保存到程序所在目录的 `cloud-starrail-screencapture` 文件夹；可自行更改目录。已有用户设置在升级时保留。
+
+当前版本不提供正式的 Steam 叠加支持。GPU 截图优化计划在后续小版本提供。

@@ -1,0 +1,25 @@
+const call=(action,settings)=>window.__TAURI_INTERNALS__.invoke('media_settings',{action,settings});
+const $=id=>document.getElementById(id);
+let data,editing=null,picking=false,loading=false,saveChain=Promise.resolve(),timer=null,focusGeneration=0;
+function error(e){$("feedback").textContent=String(e);$("feedback").hidden=false;fit();}
+function snapshot(){return {...data,folder:$("folder").value,resolution:Number($("resolution").value),quality:$("quality").value,custom_mbps:Number($("mbps").value),screenshot:$("screenshot").value};}
+function save(){if(!data||loading)return saveChain;const next=snapshot();saveChain=saveChain.catch(()=>{}).then(async()=>{await call("save",next);$("feedback").hidden=true;fit();});return saveChain;}
+function scheduleSave(){clearTimeout(timer);timer=setTimeout(()=>save().catch(error),120);}
+async function flush(){clearTimeout(timer);await save();}
+async function fit(){try{await window.__TAURI_INTERNALS__.invoke("media_settings",{action:"resize",height:Math.ceil(document.querySelector("main").getBoundingClientRect().height+($("feedback").hidden?0:$("feedback").getBoundingClientRect().height)+2)});}catch(e){console.error(e);}}
+const names={32:'Space',33:'PageUp',34:'PageDown',35:'End',36:'Home',37:'←',38:'↑',39:'→',40:'↓',44:'PrintScreen',45:'Insert',46:'Delete',186:';',187:'=',188:',',189:'-',190:'.',191:'/',192:'`',219:'[',220:'\\',221:']',222:"'"};
+function label(k){return [k.ctrl?'Ctrl':null,k.shift?'Shift':null,k.alt?'Alt':null,k.win?'Win':null,k.key>=112&&k.key<=135?'F'+(k.key-111):(names[k.key]||String.fromCharCode(k.key))].filter(Boolean).join(' + ');}
+function bounds(){let h=Number($('resolution').value);return h>=2160?[19,28.5,38,50]:h>=1440?[11,16.5,22,32]:h>=1080?[6,9,12,24]:[3.75,5.6,7.5,12];}
+function updateBitrate(){const b=bounds(),custom=$('quality').value==='custom';$('custom').hidden=!custom;for(const id of ['mbps','bitrate-range']){$(id).min=b[0];$(id).max=b[3];}let v=Math.min(b[3],Math.max(b[0],Number($('mbps').value)||b[2]));$('mbps').value=v;$('bitrate-range').value=v;const i={low:0,medium:1,high:2,ultra:3}[$('quality').value];$('bitrate-label').textContent=custom?`可调范围 ${b[0]}–${b[3]} Mbps`:`视频码率 ${b[i]} Mbps`;}
+function render(){for(const id of ['folder','resolution','quality','screenshot'])$(id).value=data[id];$('folder').title=data.folder;$('mbps').value=data.custom_mbps;for(const id of ['record_key','screenshot_key'])$(id).textContent=label(data[id]);updateBitrate();}
+window.loadSettings=async()=>{loading=true;try{await saveChain.catch(()=>{});await finishEdit();data=await call('get');render();$('feedback').hidden=true;}catch(e){error(e);}finally{loading=false;await fit();}};
+async function finishEdit(){if(editing){$(editing).classList.remove('editing');$(editing).textContent=label(data[editing]);editing=null;}await call('edited');}
+for(const id of ['record_key','screenshot_key'])$(id).onclick=async()=>{await finishEdit();editing=id;$(id).classList.add('editing');$(id).textContent='请按下快捷键…';await call('editing');};
+window.addEventListener('keydown',async e=>{if(!editing){if(e.key==='Escape'){e.preventDefault();await close();}return;}e.preventDefault();e.stopPropagation();if(e.repeat)return;if(e.key==='Backspace'){await finishEdit();return;}if(['Control','Shift','Alt','Meta'].includes(e.key))return;let key=e.keyCode;if(key===122||(e.altKey&&key===115)||e.metaKey){error('请避开系统和窗口快捷键');return;}if(!((key>=48&&key<=57)||(key>=65&&key<=90)||(key>=112&&key<=135)||key===32||(key>=33&&key<=40)||(key>=44&&key<=46)||(key>=186&&key<=192)||(key>=219&&key<=222))||(e.ctrlKey&&[27,46].includes(key))){error('该快捷键不可用');return;}const candidate={key,ctrl:e.ctrlKey,shift:e.shiftKey,alt:e.altKey,win:e.metaKey};const other=editing==='record_key'?'screenshot_key':'record_key';if(label(candidate)===label(data[other])){error('截图与录屏不能使用相同快捷键');return;}data[editing]=candidate;await finishEdit();await save().catch(error);},true);
+window.addEventListener('focus',()=>{focusGeneration++;});
+window.addEventListener('blur',()=>{if(picking)return;const generation=++focusGeneration;setTimeout(async()=>{if(picking||generation!==focusGeneration)return;try{await finishEdit();await flush();if(generation===focusGeneration)await call('dismiss');}catch(e){error(e);}},50);});
+for(const id of ['resolution','quality','mbps'])$(id).onchange=()=>{updateBitrate();save().catch(error);};$('screenshot').onchange=()=>save().catch(error);$('bitrate-range').oninput=()=>{$('mbps').value=$('bitrate-range').value;scheduleSave();};$('bitrate-range').onchange=()=>{clearTimeout(timer);save().catch(error);};
+$('browse').onclick=async()=>{picking=true;focusGeneration++;try{await finishEdit();await flush();const path=await call('folder');if(path){$('folder').value=path;$('folder').title=path;await save();}}catch(e){error(e);}finally{picking=false;}};
+async function close(){try{await finishEdit();await flush();await call('close');}catch(e){error(e);}}
+new ResizeObserver(()=>fit()).observe(document.querySelector('main'));
+await window.loadSettings();
