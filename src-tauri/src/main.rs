@@ -40,6 +40,14 @@ const INTERACTION_SCRIPT: &str = r#"(()=>{
 
 struct ControlsOpen(AtomicBool);
 #[derive(Default)]
+struct Presented {
+    controls: Option<(bool, bool)>,
+    confirmation: Option<bool>,
+    fullscreen: Option<bool>,
+}
+#[derive(Default)]
+struct Presentation(std::sync::Mutex<Presented>);
+#[derive(Default)]
 struct SettingsAnchor(std::sync::Mutex<[f64; 4]>);
 struct ExitApproved(AtomicBool);
 struct ExitWaiting(AtomicBool);
@@ -63,6 +71,7 @@ fn main() {
         .manage(window_geometry::Aspect::default())
         .manage(recorder::Recorder::default())
         .manage(ControlsOpen(AtomicBool::new(false)))
+        .manage(Presentation::default())
         .manage(SettingsAnchor::default())
         .manage(ExitApproved(AtomicBool::new(false)))
         .manage(ExitWaiting(AtomicBool::new(false)))
@@ -280,8 +289,7 @@ async fn window_action(webview: Webview, action: String) -> Result<(), String> {
                 main.state::<ConfirmationOpen>()
                     .0
                     .store(false, Ordering::Relaxed);
-                webview
-                    .hide()
+                sync_confirmation(&main)
                     .and_then(|()| focus_game(&main))
                     .map_err(|e| e.to_string())
             }
@@ -317,12 +325,23 @@ async fn window_action(webview: Webview, action: String) -> Result<(), String> {
         "toggle" => toggle(&w),
         "close" => w.close(),
         "drag" => w.start_dragging(),
-        "sync" => layout(&w),
+        "sync" => {
+            // A local UI reload recreates its JavaScript state. Re-send mode
+            // once on readiness, while ordinary resize keeps cached state.
+            {
+                let state = w.state::<Presentation>();
+                let mut shown = state.0.lock().unwrap();
+                shown.controls = None;
+                shown.fullscreen = None;
+            }
+            layout(&w)
+        }
         "controls_open" | "controls_close" => {
             if w.is_fullscreen().map_err(|e| e.to_string())? {
-                w.state::<ControlsOpen>()
-                    .0
-                    .store(action == "controls_open", Ordering::Relaxed);
+                w.state::<ControlsOpen>().0.store(
+                    action == "controls_open" && visible_cursor_position().is_some(),
+                    Ordering::Relaxed,
+                );
             }
             sync_controls(&w)
         }
@@ -368,52 +387,95 @@ fn toggle(w: &Window) -> tauri::Result<()> {
     focus_game(w)
 }
 
+// A resize must submit one complete physical rectangle per changed view.
+// Separate set_position/set_size each performs a full Wry bounds update.
+fn set_view_bounds(
+    view: &Webview,
+    position: tauri::PhysicalPosition<i32>,
+    size: tauri::PhysicalSize<u32>,
+    scale: f64,
+) -> tauri::Result<()> {
+    let actual = view.bounds()?;
+    if actual.position.to_physical::<i32>(scale) != position
+        || actual.size.to_physical::<u32>(scale) != size
+    {
+        view.set_bounds(tauri::Rect {
+            position: position.into(),
+            size: size.into(),
+        })?;
+    }
+    Ok(())
+}
 fn layout(w: &Window) -> tauri::Result<()> {
-    #[cfg(windows)]
     if steam_probe::webviews_hidden() {
+        *w.state::<Presentation>().0.lock().unwrap() = Presented::default();
         return Ok(());
     }
-    let size = w.inner_size()?.to_logical::<f64>(w.scale_factor()?);
-    if size.width < 1. || size.height < 1. {
+    let size = w.inner_size()?;
+    let scale = w.scale_factor()?;
+    if size.width == 0 || size.height == 0 {
         return Ok(());
     }
     let fullscreen = w.is_fullscreen()?;
-    let top = if fullscreen { 0. } else { 40. };
+    let top = if fullscreen {
+        0
+    } else {
+        (40. * scale).round() as u32
+    };
     if let Some(game) = w.app_handle().get_webview("game") {
-        game.set_position(LogicalPosition::new(0., top))?;
-        game.set_size(LogicalSize::new(size.width, (size.height - top).max(1.)))?;
+        set_view_bounds(
+            &game,
+            tauri::PhysicalPosition::new(0, top as i32),
+            tauri::PhysicalSize::new(size.width, size.height.saturating_sub(top).max(1)),
+            scale,
+        )?;
     }
     sync_controls(w)?;
-    if let Some(view) = w.app_handle().get_webview("main") {
-        view.eval(format!("window.setShellFullscreen?.({fullscreen})"))?;
+    {
+        let state = w.state::<Presentation>();
+        let mut shown = state.0.lock().unwrap();
+        if shown.fullscreen != Some(fullscreen) {
+            if let Some(view) = w.app_handle().get_webview("main") {
+                view.eval(format!("window.setShellFullscreen?.({fullscreen})"))?;
+            }
+            shown.fullscreen = Some(fullscreen);
+        }
     }
     sync_confirmation(w)
 }
-
 fn sync_controls(w: &Window) -> tauri::Result<()> {
-    let size = w.inner_size()?.to_logical::<f64>(w.scale_factor()?);
+    let size = w.inner_size()?;
+    let scale = w.scale_factor()?;
     let fullscreen = w.is_fullscreen()?;
     if let Some(chrome) = w.app_handle().get_webview("controls") {
         let open = w.state::<ControlsOpen>().0.load(Ordering::Relaxed);
-        // Only mode/viewport changes need geometry updates; hover does not resize the game.
-        let expected = LogicalSize::new(176., if fullscreen { 64. } else { 40. });
-        let actual = chrome.size()?.to_logical::<f64>(w.scale_factor()?);
-        if actual != expected {
-            chrome.set_size(expected)?;
-        }
-        let position = LogicalPosition::new((size.width - 176.).max(0.), 0.);
-        if chrome.position()?.to_logical::<f64>(w.scale_factor()?) != position {
-            chrome.set_position(position)?;
-        }
-        chrome.eval(format!("window.setFullscreen?.({fullscreen}, {open})"))?;
-        if fullscreen && !open {
-            chrome.hide()?;
-        } else {
-            chrome.show()?;
+        let width = (176. * scale).round() as u32;
+        let height = (if fullscreen { 64. } else { 40. } * scale).round() as u32;
+        set_view_bounds(
+            &chrome,
+            tauri::PhysicalPosition::new(size.width.saturating_sub(width) as i32, 0),
+            tauri::PhysicalSize::new(width, height),
+            scale,
+        )?;
+        let state = w.state::<Presentation>();
+        let mut shown = state.0.lock().unwrap();
+        if shown.controls != Some((fullscreen, open)) {
+            chrome.eval(format!("window.setFullscreen?.({fullscreen}, {open})"))?;
+            let visible = !fullscreen || open;
+            let previous_visible = shown.controls.map(|(full, revealed)| !full || revealed);
+            if previous_visible != Some(visible) {
+                if visible {
+                    chrome.show()?;
+                } else {
+                    chrome.hide()?;
+                }
+            }
+            shown.controls = Some((fullscreen, open));
         }
     }
     Ok(())
 }
+
 #[cfg(target_os = "windows")]
 fn install_keys(view: &Webview) -> tauri::Result<()> {
     use webview2_com::{AcceleratorKeyPressedEventHandler, Microsoft::Web::WebView2::Win32::*};
@@ -508,55 +570,118 @@ fn report(result: tauri::Result<()>) {
 
 // The hidden overlay receives no mouse input. Detect the 7-shaped edge band in
 // native window coordinates, then reveal the original rectangular control view.
+// CSS cursor:none and normal pointer-lock hiding also remove the native cursor.
+// Query global visibility rather than the current thread's cursor/show counter.
+fn visible_cursor_position() -> Option<windows::Win32::Foundation::POINT> {
+    use windows::Win32::UI::WindowsAndMessaging::{GetCursorInfo, CURSORINFO, CURSOR_SHOWING};
+    let mut info = CURSORINFO {
+        cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+        ..Default::default()
+    };
+    unsafe {
+        GetCursorInfo(&mut info).ok()?;
+    }
+    if info.flags == CURSOR_SHOWING && !info.hCursor.0.is_null() {
+        Some(info.ptScreenPos)
+    } else {
+        None
+    }
+}
+fn controls_trigger_contains(w: &Window, cursor: windows::Win32::Foundation::POINT) -> bool {
+    let (Ok(origin), Ok(size), Ok(scale)) = (w.inner_position(), w.inner_size(), w.scale_factor())
+    else {
+        return false;
+    };
+    let right = (f64::from(origin.x) + f64::from(size.width) - f64::from(cursor.x)) / scale;
+    let top = (f64::from(cursor.y) - f64::from(origin.y)) / scale;
+    (0. ..=176.).contains(&right) && (0. ..=64.).contains(&top) && (top <= 10. || right <= 10.)
+}
 fn start_edge_watcher(app: tauri::AppHandle) {
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_millis(60));
         let Some(w) = app.get_window("main") else {
             break;
         };
-        if steam_probe::webviews_hidden()
-            || w.state::<ConfirmationOpen>().0.load(Ordering::Relaxed)
+        if steam_probe::webviews_hidden() {
+            *w.state::<Presentation>().0.lock().unwrap() = Presented::default();
+            continue;
+        }
+        if w.state::<ConfirmationOpen>().0.load(Ordering::Relaxed)
             || !w.is_fullscreen().unwrap_or(false)
             || !w.is_focused().unwrap_or(false)
-            || w.state::<ControlsOpen>().0.load(Ordering::Relaxed)
         {
             continue;
         }
-        if let (Ok(cursor), Ok(origin), Ok(size), Ok(scale)) = (
-            w.cursor_position(),
-            w.inner_position(),
-            w.inner_size(),
-            w.scale_factor(),
-        ) {
-            let right = (f64::from(origin.x) + f64::from(size.width) - cursor.x) / scale;
-            let top = (cursor.y - f64::from(origin.y)) / scale;
-            if (0. ..=176.).contains(&right)
-                && (0. ..=64.).contains(&top)
-                && (top <= 10. || right <= 10.)
-            {
+        let Some(cursor) = visible_cursor_position() else {
+            if w.state::<ControlsOpen>().0.load(Ordering::Relaxed) {
                 let target = w.clone();
                 let _ = w.run_on_main_thread(move || {
-                    target
-                        .state::<ControlsOpen>()
-                        .0
-                        .store(true, Ordering::Relaxed);
-                    report(sync_controls(&target));
+                    if target.is_fullscreen().unwrap_or(false)
+                        && visible_cursor_position().is_none()
+                    {
+                        target
+                            .state::<ControlsOpen>()
+                            .0
+                            .store(false, Ordering::Relaxed);
+                        report(sync_controls(&target));
+                    }
                 });
             }
+            continue;
+        };
+        if w.state::<ControlsOpen>().0.load(Ordering::Relaxed) {
+            continue;
+        }
+        if controls_trigger_contains(&w, cursor) {
+            let target = w.clone();
+            let _ = w.run_on_main_thread(move || {
+                // Re-check after dispatch: the game may hide the cursor while
+                // this request is waiting for the UI thread.
+                let Some(cursor) = visible_cursor_position() else {
+                    return;
+                };
+                if !target.is_fullscreen().unwrap_or(false)
+                    || !target.is_focused().unwrap_or(false)
+                    || target.state::<ConfirmationOpen>().0.load(Ordering::Relaxed)
+                    || steam_probe::webviews_hidden()
+                    || !controls_trigger_contains(&target, cursor)
+                {
+                    return;
+                }
+                target
+                    .state::<ControlsOpen>()
+                    .0
+                    .store(true, Ordering::Relaxed);
+                report(sync_controls(&target));
+            });
         }
     });
 }
 
 fn sync_confirmation(w: &Window) -> tauri::Result<()> {
     if let Some(dialog) = w.app_handle().get_webview("exit-confirm") {
-        let size = w.inner_size()?.to_logical::<f64>(w.scale_factor()?);
-        if size.width > 0. && size.height > 0. {
-            dialog.set_size(size)?;
+        let open = w.state::<ConfirmationOpen>().0.load(Ordering::Relaxed);
+        // Hidden overlays have no resize work. Size them once before showing.
+        if open {
+            let size = w.inner_size()?;
+            if size.width > 0 && size.height > 0 {
+                set_view_bounds(
+                    &dialog,
+                    tauri::PhysicalPosition::new(0, 0),
+                    size,
+                    w.scale_factor()?,
+                )?;
+            }
         }
-        if w.state::<ConfirmationOpen>().0.load(Ordering::Relaxed) {
-            dialog.show()?;
-        } else {
-            dialog.hide()?;
+        let state = w.state::<Presentation>();
+        let mut shown = state.0.lock().unwrap();
+        if shown.confirmation != Some(open) {
+            if open {
+                dialog.show()?;
+            } else {
+                dialog.hide()?;
+            }
+            shown.confirmation = Some(open);
         }
     }
     Ok(())

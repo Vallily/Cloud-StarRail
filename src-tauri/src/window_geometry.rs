@@ -100,7 +100,6 @@ unsafe extern "system" fn sizing(
             let minimum = unpack(constraint.minimum.load(Ordering::Relaxed));
             constrain(
                 &mut *(lp.0 as *mut RECT),
-                &outer,
                 wp.0 as u32,
                 unpack(constraint.ratio.load(Ordering::Relaxed)),
                 (minimum.0, (minimum.1 - top).max(1)),
@@ -116,7 +115,6 @@ fn rounded(value: i64, numerator: i64, denominator: i64) -> i32 {
 }
 fn constrain(
     rect: &mut RECT,
-    current: &RECT,
     edge: u32,
     ratio: (i32, i32),
     minimum: (i32, i32),
@@ -129,18 +127,18 @@ fn constrain(
     let h = (rect.bottom - rect.top - border.1).max(1);
     let rw = i64::from(ratio.0);
     let rh = i64::from(ratio.1);
-    let width_drives = match edge {
-        WMSZ_LEFT | WMSZ_RIGHT => true,
-        WMSZ_TOP | WMSZ_BOTTOM => false,
+    let (mut w, mut h) = match edge {
+        WMSZ_LEFT | WMSZ_RIGHT => (w, rounded(i64::from(w), rh, rw)),
+        WMSZ_TOP | WMSZ_BOTTOM => (rounded(i64::from(h), rw, rh), h),
         _ => {
-            i64::from((w - (current.right - current.left - border.0)).abs()) * rh
-                >= i64::from((h - (current.bottom - current.top - border.1)).abs()) * rw
+            // Project the requested corner onto the aspect-ratio line. This
+            // uses both coordinates and has no dependency on the previously
+            // constrained size, so width/height cannot alternate as drivers.
+            let denominator = rw * rw + rh * rh;
+            let numerator = (i64::from(w) * rw + i64::from(h) * rh) * rw;
+            let width = ((numerator + denominator / 2) / denominator).max(1) as i32;
+            (width, rounded(i64::from(width), rh, rw))
         }
-    };
-    let (mut w, mut h) = if width_drives {
-        (w, rounded(i64::from(w), rh, rw))
-    } else {
-        (rounded(i64::from(h), rw, rh), h)
     };
     if w < minimum.0 {
         w = minimum.0;
@@ -176,12 +174,6 @@ mod tests {
     use super::*;
     #[test]
     fn all_edges_keep_viewport_ratio_and_opposite_anchors() {
-        let original = RECT {
-            left: -200,
-            top: 120,
-            right: 1096,
-            bottom: 859,
-        };
         for edge in 1..=8 {
             let mut r = RECT {
                 left: -270,
@@ -191,7 +183,7 @@ mod tests {
             };
             let before = r;
             // At 125% DPI the 40 logical-pixel title is 50 physical pixels.
-            constrain(&mut r, &original, edge, (16, 9), (480, 270), (16, 19 + 50));
+            constrain(&mut r, edge, (16, 9), (480, 270), (16, 19 + 50));
             let w = r.right - r.left - 16;
             let h = r.bottom - r.top - 19 - 50;
             assert!(
@@ -211,6 +203,40 @@ mod tests {
         }
     }
     #[test]
+    fn outward_corner_drag_never_shrinks_and_corrections_are_stable() {
+        for edge in [
+            WMSZ_TOPLEFT,
+            WMSZ_TOPRIGHT,
+            WMSZ_BOTTOMLEFT,
+            WMSZ_BOTTOMRIGHT,
+        ] {
+            let mut previous = (1280, 720);
+            // The old incremental dominant-axis heuristic grew to width 1289
+            // on the first point, then shrank to 1282 on the second point.
+            for (dx, dy) in [(1, 5), (2, 6), (3, 7), (4, 8), (5, 9), (6, 10)] {
+                let (width, height) = (1280 + dx, 720 + dy);
+                let leftward = matches!(edge, WMSZ_TOPLEFT | WMSZ_BOTTOMLEFT);
+                let upward = matches!(edge, WMSZ_TOPLEFT | WMSZ_TOPRIGHT);
+                let mut r = RECT {
+                    left: if leftward { -width } else { 0 },
+                    right: if leftward { 0 } else { width },
+                    top: if upward { -height } else { 0 },
+                    bottom: if upward { 0 } else { height },
+                };
+                constrain(&mut r, edge, (16, 9), (480, 270), (0, 0));
+                let actual = (r.right - r.left, r.bottom - r.top);
+                assert!(
+                    actual.0 >= previous.0 && actual.1 >= previous.1,
+                    "edge {edge}: {previous:?} -> {actual:?}"
+                );
+                let settled = r;
+                constrain(&mut r, edge, (16, 9), (480, 270), (0, 0));
+                assert_eq!(r, settled, "repeated correction must not move the corner");
+                previous = actual;
+            }
+        }
+    }
+    #[test]
     fn minimum_and_portrait_ratio_survive_small_rectangles() {
         for ratio in [(16, 9), (21, 9), (9, 16)] {
             for edge in 1..=8 {
@@ -220,8 +246,7 @@ mod tests {
                     right: 100,
                     bottom: 140,
                 };
-                let current = r;
-                constrain(&mut r, &current, edge, ratio, (600, 400), (12, 12));
+                constrain(&mut r, edge, ratio, (600, 400), (12, 12));
                 let w = r.right - r.left - 12;
                 let h = r.bottom - r.top - 12;
                 assert!(w >= 600 && h >= 400);

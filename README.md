@@ -17,7 +17,7 @@ npm ci
 npm run dev
 ```
 
-打包：`npm run build`。更多说明见 [开发文档](docs/DEVELOPMENT.md)。
+打包：`npm run build`。
 
 本项目为非官方社区项目，与米哈游 / HoYoverse 无关联。源码采用 [MIT](LICENSE) 许可证。
 
